@@ -46,7 +46,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			reply := MapTaskDoneReply{}
 			ok := call("Coordinator.MapTaskDone", &args, &reply)
 			if !ok {
-				fmt.Printf("MapTaskDone call failed!\n")
+				log.Printf("MapTaskDone call failed!\n")
 			}
 			continue
 		}
@@ -61,7 +61,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			reply := ReduceTaskDoneReply{}
 			ok := call("Coordinator.ReduceTaskDone", &args, &reply)
 			if !ok {
-				fmt.Printf("ReduceTaskDone call failed!\n")
+				log.Printf("ReduceTaskDone call failed!\n")
 			}
 			continue
 		}
@@ -87,7 +87,7 @@ func CallMapTask(mapf func(string, string) []KeyValue) (int, int, int) {
 	reply := MapTaskReply{}
 	ok := call("Coordinator.MapTask", &args, &reply)
 	if !ok {
-		fmt.Printf("MapTask call failed!\n")
+		log.Printf("MapTask call failed!\n")
 		return -1, 0, 0
 	}
 
@@ -102,12 +102,12 @@ func CallMapTask(mapf func(string, string) []KeyValue) (int, int, int) {
 func DoMap(mapf func(string, string) []KeyValue, filename string, taskNum int, nReduce int) {
 	file, err := os.Open(filename)
 	if err != nil {
-		log.Fatalf("cannot open %v", filename)
+		log.Printf("cannot open map input '%v'", filename)
 		return
 	}
 	content, err := io.ReadAll(file)
 	if err != nil {
-		log.Fatalf("cannot read %v", filename)
+		log.Printf("cannot read map input '%v'", filename)
 		return
 	}
 	file.Close()
@@ -132,7 +132,7 @@ func DoMap(mapf func(string, string) []KeyValue, filename string, taskNum int, n
 		// produce intermediate files 'mr-X-Y', where X is the map task number, and Y is the reduce task number.
 		ofile, err := os.Create(oname)
 		if err != nil {
-			log.Fatalf("cannot create %v", oname)
+			log.Printf("cannot create map output '%v'", oname)
 			continue
 		}
 		defer ofile.Close()
@@ -141,7 +141,7 @@ func DoMap(mapf func(string, string) []KeyValue, filename string, taskNum int, n
 		for _, kv := range kvsplit[i] {
 			err := enc.Encode(&kv)
 			if err != nil {
-				log.Fatalf("cannot encode %v", kv)
+				log.Printf("cannot encode key-value pair '%v'", kv)
 				continue
 			}
 		}
@@ -153,7 +153,7 @@ func CallReduceTask(reducef func(string, []string) string) (int, int, int) {
 	reply := ReduceTaskReply{}
 	ok := call("Coordinator.ReduceTask", &args, &reply)
 	if !ok {
-		fmt.Printf("ReduceTask call failed!\n")
+		log.Printf("ReduceTask call failed!\n")
 		return -1, 0, 0
 	}
 
@@ -171,7 +171,7 @@ func DoReduce(reducef func(string, []string) string, taskNum int, nMap int) {
 		oname := fmt.Sprintf("mr-%d-%d", i, taskNum)
 		file, err := os.Open(oname)
 		if err != nil {
-			log.Fatalf("cannot open %v", oname)
+			// it's okay if some map tasks doesn't produce some of the intermediate files
 			continue
 		}
 		defer file.Close()
@@ -190,7 +190,7 @@ func DoReduce(reducef func(string, []string) string, taskNum int, nMap int) {
 	oname := fmt.Sprintf("mr-out-%d", taskNum)
 	ofile, err := os.Create(oname)
 	if err != nil {
-		log.Fatalf("cannot create %v", oname)
+		log.Printf("cannot create reduce output '%v'", oname)
 		return
 	}
 	defer ofile.Close()
