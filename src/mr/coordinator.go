@@ -7,6 +7,7 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
 type Coordinator struct {
@@ -42,15 +43,34 @@ func (c *Coordinator) MapTask(args *MapTaskArgs, reply *MapTaskReply) error {
 	}
 	reply.TasksRemaining = len(c.unprocessedFiles)
 	reply.TasksProcessing = len(c.processingFiles)
+
+	if reply.TaskNum != -1 {
+		// wait for 10 seconds to see if the task is done
+		go func() {
+			time.Sleep(10 * time.Second)
+			c.mutex.Lock()
+			defer c.mutex.Unlock()
+			_, found := c.processingFiles[reply.TaskNum]
+			if found {
+				// task is not done, put it back to unprocessedFiles
+				delete(c.processingFiles, reply.TaskNum)
+				c.unprocessedFiles[reply.TaskNum] = reply.Filename
+			}
+		}()
+	}
+
 	return nil
 }
 
 func (c *Coordinator) MapTaskDone(args *MapTaskDoneArgs, reply *MapTaskDoneReply) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	v, _ := c.processingFiles[args.TaskNum]
-	delete(c.processingFiles, args.TaskNum)
-	c.finishedFiles[args.TaskNum] = v
+	v, found := c.processingFiles[args.TaskNum]
+	if found {
+		// task is done, move it to finishedFiles
+		delete(c.processingFiles, args.TaskNum)
+		c.finishedFiles[args.TaskNum] = v
+	}
 	return nil
 }
 
@@ -67,6 +87,24 @@ func (c *Coordinator) ReduceTask(args *ReduceTaskArgs, reply *ReduceTaskReply) e
 	}
 	reply.TasksRemaining = len(c.unprocessedReduceTasks)
 	reply.TasksProcessing = len(c.processingReduceTasks)
+
+	if reply.TaskNum != -1 {
+		// wait for 10 seconds to see if the task is done
+		go func() {
+			time.Sleep(10 * time.Second)
+			c.mutex.Lock()
+			defer c.mutex.Unlock()
+			for i, v := range c.processingReduceTasks {
+				if v == reply.TaskNum {
+					// task is not done, put it back to unprocessedReduceTasks
+					c.processingReduceTasks = append(c.processingReduceTasks[:i], c.processingReduceTasks[i+1:]...)
+					c.unprocessedReduceTasks = append(c.unprocessedReduceTasks, reply.TaskNum)
+					break
+				}
+			}
+		}()
+	}
+
 	return nil
 }
 
@@ -75,6 +113,7 @@ func (c *Coordinator) ReduceTaskDone(args *ReduceTaskDoneArgs, reply *ReduceTask
 	defer c.mutex.Unlock()
 	for i, v := range c.processingReduceTasks {
 		if v == args.TaskNum {
+			// task is done, move it to finishedReduceTasks
 			c.processingReduceTasks = append(c.processingReduceTasks[:i], c.processingReduceTasks[i+1:]...)
 			c.finishedReduceTasks = append(c.finishedReduceTasks, args.TaskNum)
 			break
