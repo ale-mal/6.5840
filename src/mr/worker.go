@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"time"
 )
 
 
@@ -39,6 +40,11 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 
 	for {
+		// defer sleep for 100ms to avoid busy waiting
+		defer func() {
+			time.Sleep(100 * time.Millisecond)
+		}()
+
 		mapTaskNum, mapTasksRemaining, mapTasksProcessing := CallMapTask(mapf)
 		if mapTaskNum >= 0 {
 			// let the coordinator know that the map task is done
@@ -50,7 +56,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 			continue
 		}
-		if mapTasksRemaining > 0 {
+		if mapTasksRemaining > 0 || mapTasksProcessing > 0 {
 			continue
 		}
 
@@ -65,11 +71,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 			continue
 		}
-		if reduceTasksRemaining > 0 {
-			continue
-		}
-
-		if mapTasksProcessing > 0 || reduceTasksProcessing > 0 {
+		if reduceTasksRemaining > 0 || reduceTasksProcessing > 0 {
 			continue
 		}
 
@@ -116,9 +118,6 @@ func DoMap(mapf func(string, string) []KeyValue, filename string, taskNum int, n
 	kvsplit := make([][]KeyValue, nReduce)
 	for _, kv := range kva {
 		reduceNum := ihash(kv.Key) % nReduce
-		if kvsplit[reduceNum] == nil {
-			kvsplit[reduceNum] = make([]KeyValue, 0)
-		}
 		kvsplit[reduceNum] = append(kvsplit[reduceNum], kv)
 	}
 
@@ -127,15 +126,13 @@ func DoMap(mapf func(string, string) []KeyValue, filename string, taskNum int, n
 			continue
 		}
 
-		oname := fmt.Sprintf("mr-%d-%d", taskNum, i)
-
-		// produce intermediate files 'mr-X-Y', where X is the map task number, and Y is the reduce task number.
-		ofile, err := os.Create(oname)
+		// create temporary map task output file for reduce task i from map task taskNum
+		ofile, err := os.CreateTemp("", "mr-tmp-*")
 		if err != nil {
-			log.Printf("cannot create map output '%v'", oname)
+			log.Printf("cannot create map output '%v'", ofile.Name())
 			continue
 		}
-		defer ofile.Close()
+		defer os.Remove(ofile.Name())
 
 		enc := json.NewEncoder(ofile)
 		for _, kv := range kvsplit[i] {
@@ -144,6 +141,16 @@ func DoMap(mapf func(string, string) []KeyValue, filename string, taskNum int, n
 				log.Printf("cannot encode key-value pair '%v'", kv)
 				continue
 			}
+		}
+
+		ofile.Close()
+
+		// rename the temporary file to the final 'mr-X-Y', where X is the map task number, and Y is the reduce task number.
+		oname := fmt.Sprintf("mr-%d-%d", taskNum, i)
+		err = os.Rename(ofile.Name(), oname)
+		if err != nil {
+			log.Printf("cannot rename map output '%v'", oname)
+			continue
 		}
 	}
 }
@@ -187,17 +194,25 @@ func DoReduce(reducef func(string, []string) string, taskNum int, nMap int) {
 		}
 	}
 
-	oname := fmt.Sprintf("mr-out-%d", taskNum)
-	ofile, err := os.Create(oname)
+	ofile, err := os.CreateTemp("", "mr-tmp-*")
 	if err != nil {
-		log.Printf("cannot create reduce output '%v'", oname)
+		log.Printf("cannot create reduce output '%v'", ofile.Name())
 		return
 	}
-	defer ofile.Close()
+	defer os.Remove(ofile.Name())
 
 	for k, v := range kvmap {
 		output := reducef(k, v)
 		fmt.Fprintf(ofile, "%v %v\n", k, output)
+	}
+
+	ofile.Close()
+
+	oname := fmt.Sprintf("mr-out-%d", taskNum)
+	err = os.Rename(ofile.Name(), oname)
+	if err != nil {
+		log.Printf("cannot rename reduce output '%v'", oname)
+		return
 	}
 }
 
