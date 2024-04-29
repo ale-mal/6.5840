@@ -20,7 +20,6 @@ package raft
 import (
 	//	"bytes"
 
-	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,13 +30,6 @@ import (
 
 const tickInterval = 50 * time.Millisecond
 const heartbeatTimeout = 150 * time.Millisecond
-
-// let the base election timeout be T.
-// the election timeout is in the range [T, 2T).
-const baseElectionTimeout = 150
-
-// if the peer has not acked in this duration, it's considered inactive.
-const activeWindowWidth = 2 * baseElectionTimeout * time.Millisecond
 
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -180,257 +172,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-	Term         int
-	CandidateId  int
-	LastLogIndex int
-	LastLogTerm  int
-}
-
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-type RequestVoteReply struct {
-	// Your data here (2A).
-	Term        int
-	VoteGranted bool
-}
-
-// example RequestVote RPC handler.
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if args.Term < rf.persistentState.currentTerm {
-		DPrintf(dVote, "S%d RequestVote: term %v < currentTerm %v", rf.me, args.Term, rf.persistentState.currentTerm)
-		reply.Term = rf.persistentState.currentTerm
-		reply.VoteGranted = false
-		return
-	}
-	if args.Term > rf.persistentState.currentTerm {
-		DPrintf(dTerm, "S%d RequestVote: another server is requesting vote with greater term %v, current term goes from %v to %v. State is switching from %v to %v", rf.me, args.Term, rf.persistentState.currentTerm, args.Term, rf.state, Follower)
-		rf.persistentState.currentTerm = args.Term
-		rf.persistentState.votedFor = args.CandidateId
-		rf.resetElectionTimer()
-		reply.Term = rf.persistentState.currentTerm
-		reply.VoteGranted = true
-		rf.becomeFollower(args.Term)
-		return
-	}
-	if rf.persistentState.votedFor != -1 && rf.persistentState.votedFor != args.CandidateId {
-		DPrintf(dVote, "S%d RequestVote: already voted for %v, can't vote for %v", rf.me, rf.persistentState.votedFor, args.CandidateId)
-		reply.Term = rf.persistentState.currentTerm
-		reply.VoteGranted = false
-		return
-	}
-	if args.LastLogIndex > 0 {
-		if len(rf.persistentState.log) > 0 {
-			if args.LastLogIndex < len(rf.persistentState.log) {
-				DPrintf(dVote, "S%d RequestVote: lastLogIndex %v < len(log) %v", rf.me, args.LastLogIndex, len(rf.persistentState.log))
-				reply.Term = rf.persistentState.currentTerm
-				reply.VoteGranted = false
-				return
-			}
-			if args.LastLogIndex == len(rf.persistentState.log) && args.LastLogTerm < rf.persistentState.log[args.LastLogIndex-1].Term {
-				DPrintf(dVote, "S%d RequestVote: lastLogTerm %v < log[lastLogIndex-1].Term %v", rf.me, args.LastLogTerm, rf.persistentState.log[args.LastLogIndex-1].Term)
-				reply.Term = rf.persistentState.currentTerm
-				reply.VoteGranted = false
-				return
-			}
-		}
-	} else {
-		if len(rf.persistentState.log) > 0 {
-			DPrintf(dVote, "S%d RequestVote: lastLogIndex %v < 0, but log is not empty", rf.me, args.LastLogIndex)
-			reply.Term = rf.persistentState.currentTerm
-			reply.VoteGranted = false
-			return
-		}
-	}
-
-	DPrintf(dVote, "S%d RequestVote: voting for %v", rf.me, args.CandidateId)
-	rf.persistentState.votedFor = args.CandidateId
-	rf.resetElectionTimer()
-	reply.Term = rf.persistentState.currentTerm
-	reply.VoteGranted = true
-}
-
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
-// The labrpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
-// within a timeout interval, Call() returns true; otherwise
-// Call() returns false. Thus Call() may not return for a while.
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
-//
-// Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
-// is no need to implement your own timeouts around Call().
-//
-// look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	DPrintf(dVote, "S%d RequestVote: sending request to %v with term %v", rf.me, server, args.Term)
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	if !ok {
-		return false
-	}
-
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	rf.peerTrackers[server].lastAck = time.Now()
-
-	if rf.state != Candidate {
-		return true
-	}
-
-	if args.Term != rf.persistentState.currentTerm {
-		return true
-	}
-
-	if reply.Term > rf.persistentState.currentTerm {
-		DPrintf(dTerm, "S%d RequestVote: another server replies with greater term %v, current term goes from %v to %v. State is switching from %v to %v", rf.me, reply.Term, rf.persistentState.currentTerm, reply.Term, rf.state, Follower)
-		rf.persistentState.currentTerm = reply.Term
-		rf.persistentState.votedFor = -1
-		rf.becomeFollower(reply.Term)
-		return true
-	}
-
-	if !reply.VoteGranted {
-		DPrintf(dVote, "S%d RequestVote: vote not granted", rf.me)
-		return true
-	}
-
-	rf.votesReceived++
-	if rf.votesReceived <= len(rf.peers)/2 {
-		DPrintf(dVote, "S%d RequestVote: got vote, but not majority yet, votes received %v", rf.me, rf.votesReceived)
-		return true
-	}
-
-	DPrintf(dLeader, "S%d RequestVote: got majority of votes, switching state from %v to %v", rf.me, rf.state, Leader)
-	rf.becomeLeader()
-	return true
-}
-
-type AppendEntriesArgs struct {
-	Term         int
-	LeaderId     int
-	PrevLogIndex int
-	PrevLogTerm  int
-	Entries      []LogEntry
-	LeaderCommit int
-}
-
-type AppendEntriesReply struct {
-	Term    int
-	Success bool
-}
-
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if args.Term < rf.persistentState.currentTerm {
-		// Reply false if term < currentTerm (§5.1)
-		DPrintf(dLog, "S%d AppendEntries: term %v < currentTerm %v", rf.me, args.Term, rf.persistentState.currentTerm)
-		reply.Term = rf.persistentState.currentTerm
-		reply.Success = false
-		return
-	}
-	if args.PrevLogIndex < 0 {
-		if len(rf.persistentState.log) > 0 {
-			// Reply false if log doesn’t contain an entry at prevLogIndex (§5.3)
-			DPrintf(dLog, "S%d AppendEntries: log doesn't contain an entry at prevLogIndex %v", rf.me, args.PrevLogIndex)
-			reply.Term = rf.persistentState.currentTerm
-			reply.Success = false
-			return
-		}
-	} else if len(rf.persistentState.log) <= args.PrevLogIndex || rf.persistentState.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-		DPrintf(dLog, "S%d AppendEntries: log doesn't contain an entry at prevLogIndex %v whose term matches prevLogTerm %v", rf.me, args.PrevLogIndex, args.PrevLogTerm)
-		reply.Term = rf.persistentState.currentTerm
-		reply.Success = false
-		return
-	}
-	// If an existing entry conflicts with a new one (same index but different terms),
-	// delete the existing entry and all that follow it (§5.3)
-	// Append any new entries not already in the log
-	for i := 0; i < len(args.Entries); i++ {
-		if len(rf.persistentState.log) == args.PrevLogIndex+i+1 {
-			rf.persistentState.log = append(rf.persistentState.log, args.Entries[i])
-		} else {
-			if rf.persistentState.log[args.PrevLogIndex+i+1].Term != args.Entries[i].Term {
-				rf.persistentState.log = rf.persistentState.log[:args.PrevLogIndex+i+1]
-				rf.persistentState.log = append(rf.persistentState.log, args.Entries[i])
-			}
-		}
-	}
-	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-	if args.LeaderCommit > rf.volatileState.commitIndex {
-		rf.volatileState.commitIndex = args.LeaderCommit
-		indexOfLastNewEntry := args.PrevLogIndex + len(args.Entries)
-		if rf.volatileState.commitIndex > indexOfLastNewEntry {
-			rf.volatileState.commitIndex = indexOfLastNewEntry
-		}
-	}
-	if rf.persistentState.currentTerm == args.Term {
-		DPrintf(dLog, "S%d AppendEntries: all ok, current term is %v", rf.me, rf.persistentState.currentTerm)
-	} else {
-		DPrintf(dTerm, "S%d AppendEntries: all ok, current term goes from %v to %v", rf.me, rf.persistentState.currentTerm, args.Term)
-	}
-
-	rf.persistentState.currentTerm = args.Term
-	rf.persistentState.votedFor = -1
-	rf.state = Follower
-	rf.lastHeartbeatTime = time.Now()
-	rf.resetElectionTimer()
-
-	reply.Term = rf.persistentState.currentTerm
-	reply.Success = true
-}
-
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	if ok {
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		rf.peerTrackers[server].lastAck = time.Now()
-		if reply.Term > rf.persistentState.currentTerm {
-			DPrintf(dTerm, "S%d AppendEntries: another server replies with greater term %v, current term goes from %v to %v. State is switching from %v to %v", rf.me, reply.Term, rf.persistentState.currentTerm, reply.Term, rf.state, Follower)
-			rf.persistentState.currentTerm = reply.Term
-			rf.persistentState.votedFor = -1
-			rf.becomeFollower(reply.Term)
-			return true
-		}
-		if rf.state != Leader || args.Term != rf.persistentState.currentTerm {
-			return true
-		}
-		if reply.Success {
-			// If successful: update nextIndex and matchIndex for follower (§5.3)
-			rf.volatileStateLeader.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
-			rf.volatileStateLeader.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-		} else {
-			// If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
-			rf.volatileStateLeader.nextIndex[server]--
-		}
-	}
-	return ok
-}
-
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -472,15 +213,6 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) pastElectionTimeout() bool {
-	return time.Since(rf.lastElection) >= rf.electionTimeout
-}
-
-func (rf *Raft) resetElectionTimer() {
-	rf.lastElection = time.Now()
-	rf.electionTimeout = time.Duration(baseElectionTimeout+rand.Int63()%baseElectionTimeout) * time.Millisecond
-}
-
 func (rf *Raft) becomeLeader() {
 	rf.state = Leader
 	rf.resetTrackedIndexes()
@@ -492,29 +224,6 @@ func (rf *Raft) becomeCandidate() {
 	rf.persistentState.votedFor = rf.me
 	rf.votesReceived = 1
 	rf.resetElectionTimer()
-}
-
-func (rf *Raft) broadcastRequestVote() {
-	for i := 0; i < len(rf.peers); i++ {
-		if i == rf.me {
-			// itself
-			continue
-		}
-		args := &RequestVoteArgs{}
-		args.Term = rf.persistentState.currentTerm
-		args.CandidateId = rf.me
-		if len(rf.persistentState.log) > 0 {
-			args.LastLogIndex = len(rf.persistentState.log)
-			args.LastLogTerm = rf.persistentState.log[args.LastLogIndex-1].Term
-		} else {
-			args.LastLogIndex = 0
-			args.LastLogTerm = 0
-		}
-		go func(server int) {
-			reply := &RequestVoteReply{}
-			rf.sendRequestVote(server, args, reply)
-		}(i)
-	}
 }
 
 func (rf *Raft) becomeFollower(term int) bool {
@@ -544,34 +253,6 @@ func (rf *Raft) quorumActive() bool {
 		}
 	}
 	return 2*activePeers > len(rf.peers)
-}
-
-func (rf *Raft) broadcastAppendEntries(forced bool) {
-	if !forced {
-		return
-	}
-	for i := 0; i < len(rf.peers); i++ {
-		if i == rf.me {
-			// itself
-			continue
-		}
-		args := &AppendEntriesArgs{}
-		args.Term = rf.persistentState.currentTerm
-		args.LeaderId = rf.me
-		if len(rf.persistentState.log) > 0 {
-			args.PrevLogIndex = len(rf.persistentState.log) - 1
-			args.PrevLogTerm = rf.persistentState.log[args.PrevLogIndex].Term
-		} else {
-			args.PrevLogIndex = -1
-			args.PrevLogTerm = -1
-		}
-		args.Entries = rf.persistentState.log
-		args.LeaderCommit = rf.volatileState.commitIndex
-		go func(server int) {
-			reply := &AppendEntriesReply{}
-			rf.sendAppendEntries(server, args, reply)
-		}(i)
-	}
 }
 
 func (rf *Raft) pastHeartbeatTimeout() bool {
