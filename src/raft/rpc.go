@@ -82,7 +82,7 @@ func (rf *Raft) checkState(m Message) bool {
 	case VoteReply:
 		eligible = rf.state == Candidate && rf.persistentState.currentTerm == m.ArgsTerm
 	case AppendReply:
-		eligible = rf.state == Leader && rf.persistentState.currentTerm == m.ArgsTerm
+		eligible = rf.state == Leader && rf.persistentState.currentTerm == m.ArgsTerm // todo: ( && rf.peerTrackers[m.From].nextIndex-1 == m.PrevLogIndex )
 	}
 
 	if rf.state == Follower && (m.Type == Append) {

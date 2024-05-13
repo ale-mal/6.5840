@@ -9,9 +9,6 @@ import (
 // the election timeout is in the range [T, 2T).
 const baseElectionTimeout = 150
 
-// if the peer has not acked in this duration, it's considered inactive.
-const activeWindowWidth = 2 * baseElectionTimeout * time.Millisecond
-
 func (rf *Raft) pastElectionTimeout() bool {
 	return time.Since(rf.lastElection) >= rf.electionTimeout
 }
@@ -66,33 +63,18 @@ func (rf *Raft) broadcastRequestVote() {
 		args := &RequestVoteArgs{}
 		args.Term = rf.persistentState.currentTerm
 		args.CandidateId = rf.me
-		if len(rf.persistentState.log) > 0 {
-			args.LastLogIndex = len(rf.persistentState.log)
-			args.LastLogTerm = rf.persistentState.log[args.LastLogIndex-1].Term
-		} else {
-			args.LastLogIndex = 0
-			args.LastLogTerm = 0
-		}
+		args.LastLogIndex = rf.persistentState.log.lastIndex()
+		args.LastLogTerm = rf.persistentState.log.term(args.LastLogIndex)
 		go rf.sendRequestVote(i, args)
 	}
 }
 
 func (rf *Raft) eligibleToGrantVote(candidateLastLogIndex, candidateLastLogTerm int) bool {
-	if candidateLastLogIndex > 0 {
-		if len(rf.persistentState.log) > 0 {
-			if candidateLastLogIndex < len(rf.persistentState.log) {
-				return false
-			}
-			if candidateLastLogIndex == len(rf.persistentState.log) && candidateLastLogTerm < rf.persistentState.log[candidateLastLogIndex-1].Term {
-				return false
-			}
-		}
-	} else {
-		if len(rf.persistentState.log) > 0 {
-			return false
-		}
+	lastLogIndex := rf.persistentState.log.lastIndex()
+	if candidateLastLogIndex == lastLogIndex {
+		return candidateLastLogTerm >= rf.persistentState.log.term(lastLogIndex)
 	}
-	return true
+	return candidateLastLogIndex > lastLogIndex
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {

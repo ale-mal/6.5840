@@ -31,27 +31,6 @@ import (
 const tickInterval = 50 * time.Millisecond
 const heartbeatTimeout = 150 * time.Millisecond
 
-// as each Raft peer becomes aware that successive log entries are
-// committed, the peer should send an ApplyMsg to the service (or
-// tester) on the same server, via the applyCh passed to Make(). set
-// CommandValid to true to indicate that the ApplyMsg contains a newly
-// committed log entry.
-//
-// in part 2D you'll want to send other kinds of messages (e.g.,
-// snapshots) on the applyCh, but set CommandValid to false for these
-// other uses.
-type ApplyMsg struct {
-	CommandValid bool
-	Command      interface{}
-	CommandIndex int
-
-	// For 2D:
-	SnapshotValid bool
-	Snapshot      []byte
-	SnapshotTerm  int
-	SnapshotIndex int
-}
-
 type RaftState int
 
 const (
@@ -60,28 +39,14 @@ const (
 	Leader
 )
 
-type LogEntry struct {
-	Term int
-}
-
 type PersistentStateOnAllServers struct {
 	currentTerm int
 	votedFor    int
-	log         []LogEntry
+	log         Log
 }
 
 type VolatileStateOnAllServers struct {
-	commitIndex int
 	lastApplied int
-}
-
-type VolatileStateOnLeaders struct {
-	nextIndex  []int
-	matchIndex []int
-}
-
-type PeerTracker struct {
-	lastAck time.Time
 }
 
 // A Go object implementing a single Raft peer.
@@ -95,12 +60,11 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	state               RaftState
-	persistentState     PersistentStateOnAllServers
-	volatileState       VolatileStateOnAllServers
-	volatileStateLeader VolatileStateOnLeaders
-	lastHeartbeatTime   time.Time
-	votesReceived       int
+	state             RaftState
+	persistentState   PersistentStateOnAllServers
+	volatileState     VolatileStateOnAllServers
+	lastHeartbeatTime time.Time
+	votesReceived     int
 
 	electionTimeout time.Duration
 	lastElection    time.Time
@@ -109,6 +73,9 @@ type Raft struct {
 	lastHeartbeat    time.Time
 
 	peerTrackers []PeerTracker
+
+	applyCh          chan<- ApplyMsg
+	claimToBeApplied sync.Cond
 }
 
 // return currentTerm and whether this server
@@ -185,13 +152,22 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	// Your code here (2B).
+	isLeader := rf.state == Leader
+	if !isLeader {
+		return -1, -1, false
+	}
 
-	return index, term, isLeader
+	index := rf.persistentState.log.lastIndex() + 1
+	entry := LogEntry{Term: rf.persistentState.currentTerm, Index: index, Data: command}
+	rf.persistentState.log.append([]LogEntry{entry})
+	rf.persist()
+
+	rf.broadcastAppendEntries(true)
+
+	return index, rf.persistentState.currentTerm, true
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -234,25 +210,6 @@ func (rf *Raft) becomeFollower(term int) bool {
 		return true
 	}
 	return false
-}
-
-func (rf *Raft) resetTrackedIndexes() {
-	rf.volatileStateLeader.nextIndex = make([]int, len(rf.peers))
-	rf.volatileStateLeader.matchIndex = make([]int, len(rf.peers))
-	for i := 0; i < len(rf.peers); i++ {
-		rf.volatileStateLeader.nextIndex[i] = len(rf.persistentState.log)
-		rf.volatileStateLeader.matchIndex[i] = 0
-	}
-}
-
-func (rf *Raft) quorumActive() bool {
-	activePeers := 1
-	for i, tracker := range rf.peerTrackers {
-		if i != rf.me && time.Since(tracker.lastAck) <= activeWindowWidth {
-			activePeers++
-		}
-	}
-	return 2*activePeers > len(rf.peers)
 }
 
 func (rf *Raft) pastHeartbeatTimeout() bool {
@@ -318,12 +275,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	rf.state = Follower
+	rf.persistentState.log = makeLog()
 	rf.persistentState.currentTerm = 0
 	rf.persistentState.votedFor = -1
-	rf.volatileState.commitIndex = 0
 	rf.volatileState.lastApplied = 0
-	rf.heartbeatTimeout = heartbeatTimeout
+	rf.applyCh = applyCh
+	rf.claimToBeApplied = sync.Cond{L: &rf.mu}
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -332,8 +289,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peerTrackers = make([]PeerTracker, len(rf.peers))
 	rf.resetTrackedIndexes()
 
+	rf.state = Follower
+	rf.resetElectionTimer()
+	rf.heartbeatTimeout = heartbeatTimeout
+
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.committer()
 
 	return rf
 }
