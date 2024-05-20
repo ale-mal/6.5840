@@ -190,11 +190,14 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) becomeLeader() {
+	DPrintf(dLeader, "S%d RequestVote: becoming leader", rf.me)
 	rf.state = Leader
 	rf.resetTrackedIndexes()
 }
 
 func (rf *Raft) becomeCandidate() {
+	DPrintf(dLeader, "S%d RequestVote: starting election", rf.me)
+	defer rf.persist()
 	rf.state = Candidate
 	rf.persistentState.currentTerm++
 	rf.persistentState.votedFor = rf.me
@@ -203,6 +206,7 @@ func (rf *Raft) becomeCandidate() {
 }
 
 func (rf *Raft) becomeFollower(term int) bool {
+	DPrintf(dLeader, "S%d RequestVote: stepping down from %v to %v", rf.me, rf.state, Follower)
 	rf.state = Follower
 	if term > rf.persistentState.currentTerm {
 		rf.persistentState.currentTerm = term

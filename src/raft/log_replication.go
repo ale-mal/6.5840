@@ -36,11 +36,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		defer rf.persist()
 	}
 	if !ok {
+		DPrintf(dLeader, "S%d AppendEntries: not ok", rf.me)
 		return
 	}
 
 	reply.Err = rf.checkLogPrefixMatched(args.PrevLogIndex, args.PrevLogTerm)
 	if reply.Err != Matched {
+		DPrintf(dLeader, "S%d AppendEntries: not matched", rf.me)
 		return
 	}
 

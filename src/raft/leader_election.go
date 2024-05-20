@@ -71,10 +71,13 @@ func (rf *Raft) broadcastRequestVote() {
 
 func (rf *Raft) eligibleToGrantVote(candidateLastLogIndex, candidateLastLogTerm int) bool {
 	lastLogIndex := rf.persistentState.log.lastIndex()
-	if candidateLastLogIndex == lastLogIndex {
-		return candidateLastLogTerm >= rf.persistentState.log.term(lastLogIndex)
+	lastLogTerm := rf.persistentState.log.term(lastLogIndex)
+	if candidateLastLogTerm > lastLogTerm {
+		return true
+	} else if candidateLastLogTerm == lastLogTerm {
+		return candidateLastLogIndex >= lastLogIndex
 	}
-	return candidateLastLogIndex > lastLogIndex
+	return false
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
