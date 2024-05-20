@@ -52,11 +52,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for i := args.PrevLogIndex + 1; i < args.PrevLogIndex+1+len(args.Entries); i++ {
 		if i > rf.persistentState.log.lastIndex() {
 			rf.persistentState.log.append(args.Entries[i-args.PrevLogIndex-1:])
+			if !termChanged {
+				rf.persist()
+			}
 			break
 		}
 		if rf.persistentState.log.term(i) != args.Entries[i-args.PrevLogIndex-1].Term {
 			rf.persistentState.log.entries = rf.persistentState.log.entries[:i]
 			rf.persistentState.log.append(args.Entries[i-args.PrevLogIndex-1:])
+			if !termChanged {
+				rf.persist()
+			}
 			break
 		}
 	}
