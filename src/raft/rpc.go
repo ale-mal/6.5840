@@ -35,9 +35,11 @@ const (
 )
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
-	Err     Err
+	Term               int
+	Err                Err
+	LastLogIndex       int
+	ConflictTerm       int
+	FirstConflictIndex int
 }
 
 type MessageType string

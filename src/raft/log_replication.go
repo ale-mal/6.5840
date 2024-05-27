@@ -4,22 +4,28 @@ import "time"
 
 func (rf *Raft) checkLogPrefixMatched(leaderPrevLogIndex, leaderPrevLogTerm int) Err {
 	lastLogIndex := rf.persistentState.log.lastIndex()
-	if leaderPrevLogIndex < 0 {
-		if lastLogIndex >= 0 {
-			// Reply false if log doesn’t contain an entry at prevLogIndex (§5.3)
-			return IndexNotMatched
-		}
-	} else if leaderPrevLogIndex > lastLogIndex {
-		// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+	if leaderPrevLogIndex < 0 || leaderPrevLogIndex > lastLogIndex {
+		// Reply false if log doesn’t contain an entry at prevLogIndex (§5.3)
 		return IndexNotMatched
-	} else {
-		logTerm := rf.persistentState.log.term(leaderPrevLogIndex)
-		if logTerm != leaderPrevLogTerm {
-			// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-			return TermNotMatched
-		}
+	}
+	prevLogTerm := rf.persistentState.log.term(leaderPrevLogIndex)
+	if prevLogTerm != leaderPrevLogTerm {
+		// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+		return TermNotMatched
 	}
 	return Matched
+}
+
+func (rf *Raft) findFirstConflict(index int) (int, int) {
+	conflictTerm := rf.persistentState.log.term(index)
+	firstConflictIndex := index
+	for i := index - 1; i >= 0; i-- {
+		if term := rf.persistentState.log.term(i); term != conflictTerm {
+			break
+		}
+		firstConflictIndex = i
+	}
+	return conflictTerm, firstConflictIndex
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -27,7 +33,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	reply.Term = rf.persistentState.currentTerm
-	reply.Success = false
+	reply.Err = Rejected
 
 	m := Message{Type: Append, From: args.LeaderId, Term: args.Term}
 	ok, termChanged := rf.checkMessage(m)
@@ -42,6 +48,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Err = rf.checkLogPrefixMatched(args.PrevLogIndex, args.PrevLogTerm)
 	if reply.Err != Matched {
+		if reply.Err == IndexNotMatched {
+			reply.LastLogIndex = rf.persistentState.log.lastIndex()
+		} else {
+			reply.ConflictTerm, reply.FirstConflictIndex = rf.findFirstConflict(args.PrevLogIndex)
+		}
 		DPrintf(dLeader, "S%d AppendEntries: not matched", rf.me)
 		return
 	}
@@ -76,8 +87,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.lastHeartbeatTime = time.Now()
 	rf.resetElectionTimer()
-
-	reply.Success = true
 }
 
 func (rf *Raft) maybeCommittedTo(index int) {
@@ -111,7 +120,11 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 		return
 	}
 
-	if reply.Success {
+	switch reply.Err {
+	case Rejected:
+		// Do nothing
+
+	case Matched:
 		// If successful: update nextIndex and matchIndex for follower (§5.3)
 		rf.peerTrackers[server].nextIndex = args.PrevLogIndex + len(args.Entries) + 1
 		rf.peerTrackers[server].matchIndex = args.PrevLogIndex + len(args.Entries)
@@ -120,10 +133,36 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 		if rf.maybeCommitMatched(rf.peerTrackers[server].matchIndex) {
 			rf.broadcastAppendEntries(true)
 		}
-	} else {
+
+	case IndexNotMatched:
 		// If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
 		rf.peerTrackers[server].nextIndex--
-		DPrintf(dLeader, "S%d AppendEntries: got fail from %v, nextIndex %v, matchIndex %v", rf.me, server, rf.peerTrackers[server].nextIndex, rf.peerTrackers[server].matchIndex)
+		if reply.LastLogIndex < rf.persistentState.log.lastIndex() {
+			rf.peerTrackers[server].nextIndex = reply.LastLogIndex + 1
+		} else {
+			rf.peerTrackers[server].nextIndex = rf.persistentState.log.lastIndex() + 1
+		}
+
+		rf.broadcastAppendEntries(true)
+
+		DPrintf(dLeader, "S%d AppendEntries: got IndexNotMatched from %v, nextIndex %v, matchIndex %v", rf.me, server, rf.peerTrackers[server].nextIndex, rf.peerTrackers[server].matchIndex)
+
+	case TermNotMatched:
+		// If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
+		rf.peerTrackers[server].nextIndex--
+		newNextIndex := reply.FirstConflictIndex
+		for i := rf.persistentState.log.lastIndex(); i >= 0; i-- {
+			if term := rf.persistentState.log.term(i); term == reply.ConflictTerm {
+				newNextIndex = i
+				break
+			}
+		}
+
+		rf.peerTrackers[server].nextIndex = newNextIndex
+
+		rf.broadcastAppendEntries(true)
+
+		DPrintf(dLeader, "S%d AppendEntries: got TermNotMatched from %v, nextIndex %v, matchIndex %v", rf.me, server, rf.peerTrackers[server].nextIndex, rf.peerTrackers[server].matchIndex)
 	}
 }
 
