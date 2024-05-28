@@ -101,12 +101,13 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	if e.Encode(rf.persistentState.currentTerm) != nil || e.Encode(rf.persistentState.votedFor) != nil || e.Encode(rf.persistentState.log.entries) != nil || e.Encode(rf.persistentState.log.applied) != nil || e.Encode(rf.persistentState.log.commited) != nil {
+	if e.Encode(rf.persistentState.currentTerm) != nil || e.Encode(rf.persistentState.votedFor) != nil || e.Encode(rf.persistentState.log.entries) != nil || e.Encode(rf.persistentState.log.applied) != nil ||
+		e.Encode(rf.persistentState.log.commited) != nil || e.Encode(rf.persistentState.log.snapshot.Index) != nil || e.Encode(rf.persistentState.log.snapshot.Term) != nil {
 		panic("error encoding persistent state")
 	}
 
 	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
+	rf.persister.Save(raftstate, rf.persistentState.log.snapshot.Data)
 }
 
 // restore previously persisted state.
@@ -118,11 +119,13 @@ func (rf *Raft) readPersist(data []byte) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	persistentState := PersistentStateOnAllServers{}
-	if d.Decode(&persistentState.currentTerm) != nil || d.Decode(&persistentState.votedFor) != nil || d.Decode(&persistentState.log.entries) != nil || d.Decode(&persistentState.log.applied) != nil || d.Decode(&persistentState.log.commited) != nil {
+	if d.Decode(&persistentState.currentTerm) != nil || d.Decode(&persistentState.votedFor) != nil || d.Decode(&persistentState.log.entries) != nil || d.Decode(&persistentState.log.applied) != nil ||
+		d.Decode(&persistentState.log.commited) != nil || d.Decode(&persistentState.log.snapshot.Index) != nil || d.Decode(&persistentState.log.snapshot.Term) != nil {
 		panic("error decoding persistent state")
 	}
 
 	rf.persistentState = persistentState
+	rf.persistentState.log.compactedTo(Snapshot{Data: rf.persister.ReadSnapshot(), Index: rf.persistentState.log.snapshot.Index, Term: rf.persistentState.log.snapshot.Term})
 }
 
 // the service says it has created a snapshot that has
@@ -131,7 +134,17 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	snapshotIndex := index
+	if snapshotIndex <= rf.persistentState.log.snapshot.Index {
+		return
+	}
+
+	snapshotTerm := rf.persistentState.log.term(snapshotIndex)
+	rf.persistentState.log.compactedTo(Snapshot{Data: snapshot, Index: snapshotIndex, Term: snapshotTerm})
+	rf.persist()
 }
 
 // the service using Raft (e.g. a k/v server) wants to start

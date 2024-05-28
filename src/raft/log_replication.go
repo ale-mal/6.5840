@@ -6,11 +6,13 @@ func (rf *Raft) checkLogPrefixMatched(leaderPrevLogIndex, leaderPrevLogTerm int)
 	lastLogIndex := rf.persistentState.log.lastIndex()
 	if leaderPrevLogIndex < 0 || leaderPrevLogIndex > lastLogIndex {
 		// Reply false if log doesn’t contain an entry at prevLogIndex (§5.3)
+		DPrintf(dLeader, "S%d AppendEntries: IndexNotMatched", rf.me)
 		return IndexNotMatched
 	}
 	prevLogTerm := rf.persistentState.log.term(leaderPrevLogIndex)
 	if prevLogTerm != leaderPrevLogTerm {
 		// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+		DPrintf(dLeader, "S%d AppendEntries: TermNotMatched, expected %v, got %v. Entries: %v", rf.me, prevLogTerm, leaderPrevLogTerm, rf.persistentState.log.entries)
 		return TermNotMatched
 	}
 	return Matched
@@ -19,7 +21,7 @@ func (rf *Raft) checkLogPrefixMatched(leaderPrevLogIndex, leaderPrevLogTerm int)
 func (rf *Raft) findFirstConflict(index int) (int, int) {
 	conflictTerm := rf.persistentState.log.term(index)
 	firstConflictIndex := index
-	for i := index - 1; i >= 0; i-- {
+	for i := index - 1; i > rf.persistentState.log.firstIndex(); i-- {
 		if term := rf.persistentState.log.term(i); term != conflictTerm {
 			break
 		}
@@ -60,23 +62,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// If an existing entry conflicts with a new one (same index but different terms),
 	// delete the existing entry and all that follow it (§5.3)
 	// Append any new entries not already in the log
-	for i := args.PrevLogIndex + 1; i < args.PrevLogIndex+1+len(args.Entries); i++ {
-		if i > rf.persistentState.log.lastIndex() {
-			rf.persistentState.log.append(args.Entries[i-args.PrevLogIndex-1:])
-			if !termChanged {
-				rf.persist()
-			}
-			break
-		}
-		if rf.persistentState.log.term(i) != args.Entries[i-args.PrevLogIndex-1].Term {
-			rf.persistentState.log.entries = rf.persistentState.log.entries[:i]
-			rf.persistentState.log.append(args.Entries[i-args.PrevLogIndex-1:])
+	for i, entry := range args.Entries {
+		if term := rf.persistentState.log.term(entry.Index); term == -1 || term != entry.Term {
+			rf.persistentState.log.truncateSuffix(entry.Index)
+			rf.persistentState.log.append(args.Entries[i:])
 			if !termChanged {
 				rf.persist()
 			}
 			break
 		}
 	}
+
 	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	lastNewLogIndex := args.PrevLogIndex + len(args.Entries)
 	if args.LeaderCommit < lastNewLogIndex {
@@ -136,33 +132,29 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 
 	case IndexNotMatched:
 		// If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
-		rf.peerTrackers[server].nextIndex--
 		if reply.LastLogIndex < rf.persistentState.log.lastIndex() {
 			rf.peerTrackers[server].nextIndex = reply.LastLogIndex + 1
 		} else {
 			rf.peerTrackers[server].nextIndex = rf.persistentState.log.lastIndex() + 1
 		}
+		DPrintf(dLeader, "S%d AppendEntries: got IndexNotMatched from %v, nextIndex %v, matchIndex %v", rf.me, server, rf.peerTrackers[server].nextIndex, rf.peerTrackers[server].matchIndex)
 
 		rf.broadcastAppendEntries(true)
 
-		DPrintf(dLeader, "S%d AppendEntries: got IndexNotMatched from %v, nextIndex %v, matchIndex %v", rf.me, server, rf.peerTrackers[server].nextIndex, rf.peerTrackers[server].matchIndex)
-
 	case TermNotMatched:
 		// If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
-		rf.peerTrackers[server].nextIndex--
 		newNextIndex := reply.FirstConflictIndex
-		for i := rf.persistentState.log.lastIndex(); i >= 0; i-- {
+		for i := rf.persistentState.log.lastIndex(); i > rf.persistentState.log.firstIndex(); i-- {
 			if term := rf.persistentState.log.term(i); term == reply.ConflictTerm {
 				newNextIndex = i
 				break
 			}
 		}
-
 		rf.peerTrackers[server].nextIndex = newNextIndex
+		DPrintf(dLeader, "S%d AppendEntries: got TermNotMatched from %v, nextIndex %v, matchIndex %v", rf.me, server, rf.peerTrackers[server].nextIndex, rf.peerTrackers[server].matchIndex)
 
 		rf.broadcastAppendEntries(true)
 
-		DPrintf(dLeader, "S%d AppendEntries: got TermNotMatched from %v, nextIndex %v, matchIndex %v", rf.me, server, rf.peerTrackers[server].nextIndex, rf.peerTrackers[server].matchIndex)
 	}
 }
 
@@ -201,16 +193,22 @@ func (rf *Raft) broadcastAppendEntries(forced bool) {
 			// itself
 			continue
 		}
-		nextIndex := rf.peerTrackers[i].nextIndex
-		prevLogIndex := nextIndex - 1
 
-		args := &AppendEntriesArgs{}
-		args.Term = rf.persistentState.currentTerm
-		args.LeaderId = rf.me
-		args.PrevLogIndex = prevLogIndex
-		args.PrevLogTerm = rf.persistentState.log.term(prevLogIndex)
-		args.Entries = rf.persistentState.log.slice(nextIndex, rf.persistentState.log.lastIndex()+1)
-		args.LeaderCommit = rf.persistentState.log.commited
-		go rf.sendAppendEntries(i, args)
+		if rf.lagBehindSnapshot(i) {
+			// TODO: send InstallSnapshot
+
+		} else {
+			nextIndex := rf.peerTrackers[i].nextIndex
+			prevLogIndex := nextIndex - 1
+
+			args := &AppendEntriesArgs{}
+			args.Term = rf.persistentState.currentTerm
+			args.LeaderId = rf.me
+			args.PrevLogIndex = prevLogIndex
+			args.PrevLogTerm = rf.persistentState.log.term(prevLogIndex)
+			args.Entries = rf.persistentState.log.slice(nextIndex, rf.persistentState.log.lastIndex()+1)
+			args.LeaderCommit = rf.persistentState.log.commited
+			go rf.sendAppendEntries(i, args)
+		}
 	}
 }
