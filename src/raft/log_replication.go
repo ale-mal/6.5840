@@ -93,7 +93,7 @@ func (rf *Raft) maybeCommittedTo(index int) {
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
-	DPrintf(dLeader, "S%d AppendEntries: sending to %v, args %v", rf.me, server, args)
+	DPrintf(dLeader, "S%d AppendEntries: sending to %v, term %v, prevLogIndex %v, leaderCommit %v", rf.me, server, args.Term, args.PrevLogIndex, args.LeaderCommit)
 	reply := &AppendEntriesReply{}
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	if ok {
@@ -104,8 +104,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
-	rf.peerTrackers[server].lastAck = time.Now()
 
 	m := Message{Type: AppendReply, From: server, Term: reply.Term, ArgsTerm: args.Term, PrevLogIndex: args.PrevLogIndex}
 	ok, termChanged := rf.checkMessage(m)
@@ -184,20 +182,23 @@ func (rf *Raft) maybeCommitMatched(index int) bool {
 	return false
 }
 
+func (rf *Raft) hasNewEntries(to int) bool {
+	return rf.peerTrackers[to].nextIndex <= rf.persistentState.log.lastIndex()
+}
+
 func (rf *Raft) broadcastAppendEntries(forced bool) {
-	if !forced {
-		return
-	}
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
-			// itself
 			continue
 		}
 
 		if rf.lagBehindSnapshot(i) {
-			// TODO: send InstallSnapshot
-
-		} else {
+			args := &InstallSnapshotArgs{}
+			args.Term = rf.persistentState.currentTerm
+			args.LeaderId = rf.me
+			args.Snapshot = rf.persistentState.log.clonedSnapshot()
+			go rf.sendInstallSnapshot(i, args)
+		} else if forced || rf.hasNewEntries(i) {
 			nextIndex := rf.peerTrackers[i].nextIndex
 			prevLogIndex := nextIndex - 1
 

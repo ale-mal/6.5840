@@ -42,6 +42,18 @@ type AppendEntriesReply struct {
 	FirstConflictIndex int
 }
 
+type InstallSnapshotArgs struct {
+	Term     int
+	LeaderId int
+	Snapshot Snapshot
+}
+
+type InstallSnapshotReply struct {
+	From     int
+	Term     int
+	CaughtUp bool
+}
+
 type MessageType string
 
 const (
@@ -49,6 +61,8 @@ const (
 	VoteReply   MessageType = "RequestVoteReply"
 	Append      MessageType = "AppendEntries"
 	AppendReply MessageType = "AppendEntriesReply"
+	Snap        MessageType = "InstallSnapshot"
+	SnapReply   MessageType = "InstallSnapshotReply"
 )
 
 type Message struct {
@@ -65,7 +79,7 @@ func (rf *Raft) checkTerm(m Message) (bool, bool) {
 		return false, false
 	}
 	// step down if received a more up-to-date message or received a message from the current leader.
-	if m.Term > rf.persistentState.currentTerm || (m.Type == Append) {
+	if m.Term > rf.persistentState.currentTerm || (m.Type == Append || m.Type == Snap) {
 		termChanged := rf.becomeFollower(m.Term)
 		return true, termChanged
 	}
@@ -81,13 +95,17 @@ func (rf *Raft) checkState(m Message) bool {
 		fallthrough
 	case Append:
 		eligible = rf.state == Follower
+	case Snap:
+		eligible = rf.state == Follower && !rf.persistentState.log.hasPendingSnapshot
 	case VoteReply:
 		eligible = rf.state == Candidate && rf.persistentState.currentTerm == m.ArgsTerm
 	case AppendReply:
-		eligible = rf.state == Leader && rf.persistentState.currentTerm == m.ArgsTerm // todo: ( && rf.peerTrackers[m.From].nextIndex-1 == m.PrevLogIndex )
+		eligible = rf.state == Leader && rf.persistentState.currentTerm == m.ArgsTerm && rf.peerTrackers[m.From].nextIndex-1 == m.PrevLogIndex
+	case SnapReply:
+		eligible = rf.state == Leader && rf.persistentState.currentTerm == m.ArgsTerm && rf.lagBehindSnapshot(m.From)
 	}
 
-	if rf.state == Follower && (m.Type == Append) {
+	if rf.state == Follower && (m.Type == Append || m.Type == Snap) {
 		rf.resetElectionTimer()
 	}
 
@@ -95,7 +113,7 @@ func (rf *Raft) checkState(m Message) bool {
 }
 
 func (rf *Raft) checkMessage(m Message) (bool, bool) {
-	if m.Type == VoteReply || m.Type == AppendReply {
+	if m.Type == VoteReply || m.Type == AppendReply || m.Type == SnapReply {
 		rf.peerTrackers[m.From].lastAck = time.Now()
 	}
 
