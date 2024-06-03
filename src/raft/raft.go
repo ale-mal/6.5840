@@ -101,8 +101,7 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	if e.Encode(rf.persistentState.currentTerm) != nil || e.Encode(rf.persistentState.votedFor) != nil || e.Encode(rf.persistentState.log.entries) != nil || e.Encode(rf.persistentState.log.applied) != nil ||
-		e.Encode(rf.persistentState.log.commited) != nil || e.Encode(rf.persistentState.log.snapshot.Index) != nil || e.Encode(rf.persistentState.log.snapshot.Term) != nil {
+	if e.Encode(rf.persistentState.currentTerm) != nil || e.Encode(rf.persistentState.votedFor) != nil || e.Encode(rf.persistentState.log.entries) != nil || e.Encode(rf.persistentState.log.snapshot.Index) != nil || e.Encode(rf.persistentState.log.snapshot.Term) != nil {
 		panic("error encoding persistent state")
 	}
 
@@ -119,8 +118,7 @@ func (rf *Raft) readPersist(data []byte) {
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	persistentState := PersistentStateOnAllServers{}
-	if d.Decode(&persistentState.currentTerm) != nil || d.Decode(&persistentState.votedFor) != nil || d.Decode(&persistentState.log.entries) != nil || d.Decode(&persistentState.log.applied) != nil ||
-		d.Decode(&persistentState.log.commited) != nil || d.Decode(&persistentState.log.snapshot.Index) != nil || d.Decode(&persistentState.log.snapshot.Term) != nil {
+	if d.Decode(&persistentState.currentTerm) != nil || d.Decode(&persistentState.votedFor) != nil || d.Decode(&persistentState.log.entries) != nil || d.Decode(&persistentState.log.snapshot.Index) != nil || d.Decode(&persistentState.log.snapshot.Term) != nil {
 		panic("error decoding persistent state")
 	}
 

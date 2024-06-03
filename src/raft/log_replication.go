@@ -1,7 +1,5 @@
 package raft
 
-import "time"
-
 func (rf *Raft) checkLogPrefixMatched(leaderPrevLogIndex, leaderPrevLogTerm int) Err {
 	lastLogIndex := rf.persistentState.log.lastIndex()
 	if leaderPrevLogIndex < 0 || leaderPrevLogIndex > lastLogIndex {
@@ -80,9 +78,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	DPrintf(dLeader, "S%d AppendEntries: maybeCommittedTo min(%v, %v)", rf.me, args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
 	rf.maybeCommittedTo(lastNewLogIndex)
-
-	rf.lastHeartbeatTime = time.Now()
-	rf.resetElectionTimer()
 }
 
 func (rf *Raft) maybeCommittedTo(index int) {
